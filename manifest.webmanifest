@@ -1,0 +1,21 @@
+{
+  "name": "סקיל מסרטון",
+  "short_name": "סקיל",
+  "description": "Send a video link to the PC to build a Claude skill from it",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#181a2b",
+  "theme_color": "#181a2b",
+  "lang": "he",
+  "dir": "rtl",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}

@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>סקיל מסרטון</title>
+<link rel="icon" href="favicon.ico">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#181a2b">
+<style>
+  :root { --bg:#181a2b; --card:#23263d; --fg:#f2f2f7; --muted:#a4a7c0; --accent:#ff5c48; --ok:#3ddc84; --warn:#ffd65a; --err:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:17px/1.5 system-ui, "Segoe UI", Arial, sans-serif; padding:16px; }
+  main { max-width:520px; margin:0 auto; }
+  h1 { font-size:20px; margin:4px 0 16px; display:flex; gap:10px; align-items:center; }
+  h1 img { width:32px; height:32px; }
+  .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:14px; }
+  .big { font-size:54px; text-align:center; line-height:1.2; }
+  .status { text-align:center; font-size:19px; margin-top:6px; }
+  .url { direction:ltr; text-align:left; font-size:13px; color:var(--muted); word-break:break-all; margin-top:8px; }
+  label { display:block; font-size:14px; color:var(--muted); margin:10px 0 4px; }
+  input, textarea { width:100%; padding:12px; border-radius:10px; border:1px solid #3a3e5c; background:#1b1d30; color:var(--fg); font-size:16px; direction:ltr; }
+  button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--accent); color:#fff; font-size:17px; font-weight:600; margin-top:12px; }
+  button.ghost { background:transparent; border:1px solid #3a3e5c; color:var(--fg); }
+  ul { list-style:none; padding:0; margin:0; }
+  li { font-size:13px; padding:6px 0; border-bottom:1px solid #2f3350; direction:ltr; text-align:left; color:var(--muted); word-break:break-all; }
+  li b { color:var(--fg); font-weight:500; }
+  .hidden { display:none; }
+  .stamp { text-align:center; font-size:12px; color:var(--muted); margin-top:18px; }
+  a { color:var(--warn); }
+</style>
+</head>
+<body>
+<main>
+  <h1><img src="icon-192.png" alt="">סקיל מסרטון</h1>
+
+  <section id="result" class="card hidden">
+    <div class="big" id="resIcon">⏳</div>
+    <div class="status" id="resText">שולח…</div>
+    <div class="url" id="resUrl"></div>
+  </section>
+
+  <section id="setup" class="card hidden">
+    <b>הגדרה חד-פעמית</b>
+    <label for="token">GitHub token (fine-grained, Issues: write על ריפו אחד)</label>
+    <input id="token" type="password" autocomplete="off" placeholder="github_pat_…">
+    <label for="repo">ריפו התור</label>
+    <input id="repo" placeholder="owner/video-skill-inbox">
+    <button id="saveSetup">שמור</button>
+    <p style="font-size:14px;color:var(--muted)">אחרי השמירה: תפריט Chrome ← "הוספה למסך הבית / התקנת אפליקציה". מאז "סקיל מסרטון" יופיע בתפריט <b>שתף</b> של טיקטוק, אינסטגרם, פייסבוק ויוטיוב.</p>
+  </section>
+
+  <section id="manual" class="card hidden">
+    <label for="manualUrl">או הדבק לינק ידנית</label>
+    <input id="manualUrl" type="url" placeholder="https://…">
+    <button id="sendManual">שלח למחשב</button>
+  </section>
+
+  <section id="history" class="card hidden">
+    <b>נשלחו לאחרונה</b>
+    <ul id="histList"></ul>
+    <button class="ghost" id="showSetup">הגדרות</button>
+  </section>
+
+  <div class="stamp">Build <span id="build"></span></div>
+</main>
+<script>
+const BUILD = "2026-09-27 10:55 v1 share-target";
+document.getElementById("build").textContent = BUILD;
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+};
+const URL_RE = /https?:\/\/[^\s<>"']+/;
+
+function cfg() { return { token: store.get("token", ""), repo: store.get("repo", "") }; }
+
+function show(id, on = true) { $(id).classList.toggle("hidden", !on); }
+
+function setResult(icon, text, url) {
+  show("result");
+  $("resIcon").textContent = icon;
+  $("resText").textContent = text;
+  $("resUrl").textContent = url || "";
+}
+
+function renderHistory() {
+  const h = store.get("history", []);
+  $("histList").innerHTML = "";
+  for (const item of h.slice(0, 8)) {
+    const li = document.createElement("li");
+    const mark = item.state === "sent" ? "✓" : "⏳";
+    li.innerHTML = `<b>${mark} ${new Date(item.at).toLocaleString("he-IL")}</b><br>`;
+    li.appendChild(document.createTextNode(item.url));
+    $("histList").appendChild(li);
+  }
+  show("history", true);
+}
+
+async function postIssue(url, note) {
+  const { token, repo } = cfg();
+  const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
+    body: JSON.stringify({ title: `skill: ${url}`, body: `${url}\n\n${note || ""}\n\nsent from phone ${new Date().toISOString()} (${BUILD})` }),
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}`);
+  return res.json();
+}
+
+async function send(url, note) {
+  const h = store.get("history", []);
+  const entry = { url, note, at: Date.now(), state: "pending" };
+  h.unshift(entry);
+  store.set("history", h.slice(0, 30));
+  setResult("⏳", "שולח…", url);
+  try {
+    await postIssue(url, note);
+    entry.state = "sent";
+    store.set("history", h.slice(0, 30));
+    setResult("✅", "נשמר בתור. המחשב יבנה את הסקיל כשיידלק.", url);
+    if (navigator.vibrate) navigator.vibrate(60);
+  } catch (e) {
+    setResult("📥", `אין חיבור (${e.message}). נשמר בטלפון ויישלח בפתיחה הבאה.`, url);
+  }
+  renderHistory();
+}
+
+async function flushPending() {
+  const h = store.get("history", []);
+  let changed = false;
+  for (const item of h.filter((i) => i.state === "pending")) {
+    try { await postIssue(item.url, item.note); item.state = "sent"; changed = true; } catch { break; }
+  }
+  if (changed) { store.set("history", h); renderHistory(); }
+}
+
+function init() {
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (hash.get("repo")) store.set("repo", hash.get("repo"));
+  $("repo").value = cfg().repo;
+  $("saveSetup").onclick = () => {
+    store.set("token", $("token").value.trim());
+    store.set("repo", $("repo").value.trim());
+    $("token").value = "";
+    show("setup", false);
+    setResult("✅", "נשמר. עכשיו התקן את האפליקציה למסך הבית.");
+    show("manual");
+  };
+  $("showSetup").onclick = () => show("setup");
+  $("sendManual").onclick = () => {
+    const m = ($("manualUrl").value || "").match(URL_RE);
+    if (m) { send(m[0], "manual"); $("manualUrl").value = ""; }
+  };
+
+  const { token, repo } = cfg();
+  if (!token || !repo) { show("setup"); return; }
+  show("manual");
+  renderHistory();
+
+  // Web Share Target: apps pass the link in `url`, or buried inside `text` (TikTok/Instagram add a caption).
+  const q = new URLSearchParams(location.search);
+  const shared = [q.get("url"), q.get("text"), q.get("title")].filter(Boolean).join(" ");
+  const m = shared.match(URL_RE);
+  if (m) {
+    history.replaceState(null, "", location.pathname);  // a reload must not send twice
+    send(m[0], shared.replace(m[0], "").trim());
+  } else if (shared) {
+    setResult("⚠️", "לא נמצא לינק בתוכן ששותף.", shared.slice(0, 120));
+  }
+  flushPending();
+}
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+init();
+</script>
+</body>
+</html>
