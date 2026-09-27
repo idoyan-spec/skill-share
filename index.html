@@ -66,7 +66,7 @@
   <div class="stamp">Build <span id="build"></span></div>
 </main>
 <script>
-const BUILD = "2026-09-27 09:50 v1 share-target";
+const BUILD = "2026-09-27 10:20 v2 clear-errors";
 document.getElementById("build").textContent = BUILD;
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -106,7 +106,14 @@ async function postIssue(url, note) {
     headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
     body: JSON.stringify({ title: `skill: ${url}`, body: `${url}\n\n${note || ""}\n\nsent from phone ${new Date().toISOString()} (${BUILD})` }),
   });
-  if (!res.ok) throw new Error(`GitHub ${res.status}`);
+  if (!res.ok) {
+    const why = {
+      401: "המפתח שגוי או שפג תוקפו. הגדרות ← להדביק מפתח חדש",
+      403: "למפתח אין הרשאת Issues: Read and write",
+      404: "המפתח לא רואה את הריפו. ביצירת המפתח צריך לבחור video-skill-inbox ב-Only select repositories",
+    }[res.status] || `GitHub ${res.status}`;
+    const err = new Error(why); err.auth = res.status < 500; throw err;
+  }
   return res.json();
 }
 
@@ -123,7 +130,8 @@ async function send(url, note) {
     setResult("✅", "נשמר בתור. המחשב יבנה את הסקיל כשיידלק.", url);
     if (navigator.vibrate) navigator.vibrate(60);
   } catch (e) {
-    setResult("📥", `אין חיבור (${e.message}). נשמר בטלפון ויישלח בפתיחה הבאה.`, url);
+    if (e.auth) setResult("🔑", `${e.message}. הלינק נשמר בטלפון ויישלח אחרי התיקון.`, url);
+    else setResult("📥", "אין חיבור לאינטרנט. הלינק נשמר בטלפון ויישלח בפתיחה הבאה.", url);
   }
   renderHistory();
 }
@@ -143,11 +151,12 @@ function init() {
   $("repo").value = cfg().repo;
   $("saveSetup").onclick = () => {
     store.set("token", $("token").value.trim());
-    store.set("repo", $("repo").value.trim());
+    store.set("repo", $("repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, ""));
     $("token").value = "";
     show("setup", false);
     setResult("✅", "נשמר. עכשיו התקן את האפליקציה למסך הבית.");
     show("manual");
+    flushPending();
   };
   $("showSetup").onclick = () => show("setup");
   $("sendManual").onclick = () => {

@@ -1,6 +1,6 @@
 // Minimal service worker: makes the page installable (required for the Android share sheet)
 // and serves the shell offline. Bump CACHE with the page BUILD.
-const CACHE = "skill-share-v1";
+const CACHE = "skill-share-v2";
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icon-192.png", "icon-512.png", "favicon.ico"];
 
 self.addEventListener("install", (e) => {
