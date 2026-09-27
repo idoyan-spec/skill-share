@@ -29,11 +29,15 @@
   .hidden { display:none; }
   .stamp { text-align:center; font-size:12px; color:var(--muted); margin-top:18px; }
   a { color:var(--warn); }
+  a.btnlink { display:block; text-align:center; padding:13px; border-radius:12px; border:1px solid var(--warn); margin-top:12px; text-decoration:none; font-weight:600; }
+  .warnbar { background:#3b3217; border:1px solid var(--warn); }
 </style>
 </head>
 <body>
 <main>
   <h1><img src="icon-192.png" alt="">סקיל מסרטון</h1>
+
+  <section id="expiry" class="card warnbar hidden"></section>
 
   <section id="result" class="card hidden">
     <div class="big" id="resIcon">⏳</div>
@@ -42,12 +46,15 @@
   </section>
 
   <section id="setup" class="card hidden">
-    <b>הגדרה חד-פעמית</b>
-    <label for="token">GitHub token (fine-grained, Issues: write על ריפו אחד)</label>
+    <b>מפתח GitHub</b>
+    <div id="tokenState" style="font-size:14px;margin-top:6px"></div>
+    <a id="newToken" class="btnlink" target="_blank" rel="noopener">1. צור מפתח חדש ב-GitHub ↗</a>
+    <p style="font-size:14px;color:var(--muted);margin:8px 0 0">השם, ההרשאה (Issues: Read and write) והתוקף (שנה) כבר ממולאים. נשאר רק: Repository access ← <b>Only select repositories</b> ← <b>video-skill-inbox</b>, ואז Generate token והעתקה.</p>
+    <label for="token">2. הדבק כאן את המפתח (github_pat_…)</label>
     <input id="token" type="password" autocomplete="off" placeholder="github_pat_…">
     <label for="repo">ריפו התור</label>
     <input id="repo" placeholder="owner/video-skill-inbox">
-    <button id="saveSetup">שמור</button>
+    <button id="saveSetup">3. שמור ובדוק</button>
     <p style="font-size:14px;color:var(--muted)">אחרי השמירה: תפריט Chrome ← "הוספה למסך הבית / התקנת אפליקציה". מאז "סקיל מסרטון" יופיע בתפריט <b>שתף</b> של טיקטוק, אינסטגרם, פייסבוק ויוטיוב.</p>
   </section>
 
@@ -66,7 +73,9 @@
   <div class="stamp">Build <span id="build"></span></div>
 </main>
 <script>
-const BUILD = "2026-09-27 10:20 v2 clear-errors";
+const BUILD = "2026-09-27 19:58 v3 token-renew";
+const TOKEN_DAYS = 366;          // GitHub's maximum for a fine-grained token; the create link asks for exactly this
+const WARN_DAYS = 14;
 document.getElementById("build").textContent = BUILD;
 const $ = (id) => document.getElementById(id);
 const store = {
@@ -84,6 +93,52 @@ function setResult(icon, text, url) {
   $("resIcon").textContent = icon;
   $("resText").textContent = text;
   $("resUrl").textContent = url || "";
+}
+
+function tokenLink() {
+  const repo = cfg().repo || "idoyan-spec/video-skill-inbox";
+  const p = new URLSearchParams({
+    name: `skill-share-phone ${new Date().toISOString().slice(0, 10)}`,
+    description: "סקיל מסרטון: פותח issue בריפו התור",
+    target_name: repo.split("/")[0],
+    expires_in: String(TOKEN_DAYS),
+    issues: "write",
+  });
+  return `https://github.com/settings/personal-access-tokens/new?${p}`;
+}
+
+function daysLeft() {
+  const exp = store.get("tokenExp", 0);
+  return exp ? Math.floor((exp - Date.now()) / 864e5) : null;
+}
+
+function renderExpiry() {
+  const d = daysLeft();
+  const when = d === null ? "" : new Date(store.get("tokenExp")).toLocaleDateString("he-IL");
+  $("tokenState").textContent = d === null ? "אין תאריך תפוגה שמור. מומלץ ליצור מפתח חדש מהכפתור."
+    : d < 0 ? `המפתח פג ב-${when}.` : `המפתח בתוקף עד ${when} (עוד ${d} ימים).`;
+  const bar = $("expiry");
+  if (d !== null && d <= WARN_DAYS) {
+    bar.innerHTML = d < 0 ? "🔑 <b>המפתח פג.</b> לינקים לא יגיעו למחשב עד שתחדש אותו." : `🔑 <b>המפתח יפוג בעוד ${d} ימים</b> (${when}).`;
+    const b = document.createElement("button"); b.textContent = "חדש עכשיו"; b.onclick = () => show("setup");
+    bar.appendChild(b); show("expiry");
+  } else show("expiry", false);
+}
+
+// A 200 on the repo proves the token is valid AND can see the queue; saves the user a failed share to find out.
+async function checkToken(token, repo) {
+  const res = await fetch(`https://api.github.com/repos/${repo}`, {
+    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json" },
+  }).catch(() => null);
+  if (!res) return "אין חיבור לאינטרנט, לא הצלחתי לבדוק. המפתח נשמר.";
+  if (res.ok) return "";
+  return { 401: "GitHub דחה את המפתח. ודא שהעתקת את כולו", 403: "למפתח אין הרשאה לריפו", 404: "המפתח לא רואה את video-skill-inbox. בחר אותו ב-Only select repositories" }[res.status] || `GitHub ${res.status}`;
+}
+
+// The share sheet sometimes fires twice for one tap; one link must become one issue.
+function dedupe(h) {
+  const seen = new Set();
+  return h.filter((i) => { const k = i.url.trim(); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 function renderHistory() {
@@ -119,6 +174,9 @@ async function postIssue(url, note) {
 
 async function send(url, note) {
   const h = store.get("history", []);
+  const prev = h.find((i) => i.url.trim() === url.trim());
+  if (prev && prev.state === "sent") { setResult("✅", "הלינק הזה כבר נשלח למחשב.", url); renderHistory(); return; }
+  if (prev) h.splice(h.indexOf(prev), 1);
   const entry = { url, note, at: Date.now(), state: "pending" };
   h.unshift(entry);
   store.set("history", h.slice(0, 30));
@@ -130,17 +188,17 @@ async function send(url, note) {
     setResult("✅", "נשמר בתור. המחשב יבנה את הסקיל כשיידלק.", url);
     if (navigator.vibrate) navigator.vibrate(60);
   } catch (e) {
-    if (e.auth) setResult("🔑", `${e.message}. הלינק נשמר בטלפון ויישלח אחרי התיקון.`, url);
+    if (e.auth) { setResult("🔑", `${e.message}. הלינק נשמר בטלפון ויישלח אחרי התיקון.`, url); show("setup"); }
     else setResult("📥", "אין חיבור לאינטרנט. הלינק נשמר בטלפון ויישלח בפתיחה הבאה.", url);
   }
   renderHistory();
 }
 
 async function flushPending() {
-  const h = store.get("history", []);
-  let changed = false;
+  const h = dedupe(store.get("history", []));
+  let changed = true;
   for (const item of h.filter((i) => i.state === "pending")) {
-    try { await postIssue(item.url, item.note); item.state = "sent"; changed = true; } catch { break; }
+    try { await postIssue(item.url, item.note); item.state = "sent"; } catch { break; }
   }
   if (changed) { store.set("history", h); renderHistory(); }
 }
@@ -149,14 +207,24 @@ function init() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("repo")) store.set("repo", hash.get("repo"));
   $("repo").value = cfg().repo;
-  $("saveSetup").onclick = () => {
-    store.set("token", $("token").value.trim());
-    store.set("repo", $("repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, ""));
+  $("newToken").href = tokenLink();
+  $("saveSetup").onclick = async () => {
+    const token = $("token").value.replace(/\s+/g, "");
+    const repo = $("repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, "");
+    if (!token) { setResult("⚠️", "לא הודבק מפתח."); return; }
+    setResult("⏳", "בודק את המפתח מול GitHub…");
+    const err = await checkToken(token, repo);
+    if (err && !err.startsWith("אין חיבור")) { setResult("❌", `${err}. לא נשמר.`); return; }
+    store.set("token", token);
+    store.set("repo", repo);
+    store.set("tokenExp", Date.now() + TOKEN_DAYS * 864e5);
     $("token").value = "";
     show("setup", false);
-    setResult("✅", "נשמר. עכשיו התקן את האפליקציה למסך הבית.");
+    setResult("✅", err || "המפתח עובד ונשמר. לינקים שחיכו נשלחים עכשיו.");
     show("manual");
-    flushPending();
+    renderExpiry();
+    await flushPending();
+    renderHistory();
   };
   $("showSetup").onclick = () => show("setup");
   $("sendManual").onclick = () => {
@@ -164,6 +232,7 @@ function init() {
     if (m) { send(m[0], "manual"); $("manualUrl").value = ""; }
   };
 
+  renderExpiry();
   const { token, repo } = cfg();
   if (!token || !repo) { show("setup"); return; }
   show("manual");
