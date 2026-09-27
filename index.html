@@ -21,6 +21,8 @@
   .url { direction:ltr; text-align:left; font-size:13px; color:var(--muted); word-break:break-all; margin-top:8px; }
   label { display:block; font-size:14px; color:var(--muted); margin:10px 0 4px; }
   input, textarea { width:100%; padding:12px; border-radius:10px; border:1px solid #3a3e5c; background:#1b1d30; color:var(--fg); font-size:16px; direction:ltr; }
+  textarea { min-height:84px; resize:vertical; direction:rtl; text-align:right; font-family:inherit; }
+  .hint { font-size:13px; color:var(--muted); margin:4px 0 0; }
   button { width:100%; padding:14px; border:0; border-radius:12px; background:var(--accent); color:#fff; font-size:17px; font-weight:600; margin-top:12px; }
   button.ghost { background:transparent; border:1px solid #3a3e5c; color:var(--fg); }
   ul { list-style:none; padding:0; margin:0; }
@@ -43,6 +45,12 @@
     <div class="big" id="resIcon">⏳</div>
     <div class="status" id="resText">שולח…</div>
     <div class="url" id="resUrl"></div>
+    <div id="instrBox" class="hidden">
+      <label for="resInstr">הנחיות משלך לסקיל הזה (לא חובה)</label>
+      <textarea id="resInstr" placeholder="למשל: תתמקד רק בחלק על X · תקרא לו Y · תתאים ל-Windows · בלי סקריפטים"></textarea>
+      <button id="sendInstr">הוסף הנחיות</button>
+      <p class="hint">אפשר להוסיף הנחיות גם אחרי השליחה, כל עוד המחשב עוד לא התחיל לבנות (הוא בודק פעם בשעה).</p>
+    </div>
   </section>
 
   <section id="setup" class="card hidden">
@@ -55,12 +63,17 @@
     <label for="repo">ריפו התור</label>
     <input id="repo" placeholder="owner/video-skill-inbox">
     <button id="saveSetup">3. שמור ובדוק</button>
+    <label for="defInstr">הנחיות קבועות לכל סקיל (לא חובה)</label>
+    <textarea id="defInstr" placeholder="למשל: תמיד בעברית · תמיד לבדוק שזה עובד ב-Windows"></textarea>
+    <button class="ghost" id="saveDef">שמור הנחיות קבועות</button>
     <p style="font-size:14px;color:var(--muted)">אחרי השמירה: תפריט Chrome ← "הוספה למסך הבית / התקנת אפליקציה". מאז "סקיל מסרטון" יופיע בתפריט <b>שתף</b> של טיקטוק, אינסטגרם, פייסבוק ויוטיוב.</p>
   </section>
 
   <section id="manual" class="card hidden">
     <label for="manualUrl">או הדבק לינק ידנית</label>
     <input id="manualUrl" type="url" placeholder="https://…">
+    <label for="manualInstr">הנחיות משלך (לא חובה)</label>
+    <textarea id="manualInstr" placeholder="מה חשוב לך שהסקיל יעשה, יתמקד בו או ישמיט"></textarea>
     <button id="sendManual">שלח למחשב</button>
   </section>
 
@@ -73,7 +86,7 @@
   <div class="stamp">Build <span id="build"></span></div>
 </main>
 <script>
-const BUILD = "2026-09-27 19:58 v3 token-renew";
+const BUILD = "2026-09-27 21:35 v4 my-instructions";
 const TOKEN_DAYS = 366;          // GitHub's maximum for a fine-grained token; the create link asks for exactly this
 const WARN_DAYS = 14;
 document.getElementById("build").textContent = BUILD;
@@ -154,13 +167,28 @@ function renderHistory() {
   show("history", true);
 }
 
-async function postIssue(url, note) {
+// What the user typed goes inside markers; the PC treats only that block as the owner's instructions.
+// The share caption (the video's own text) stays outside it, because it is untrusted.
+function instrBlock(text) {
+  const t = (text || "").trim();
+  return t ? `<!-- instructions -->\n### הנחיות\n${t}\n<!-- /instructions -->` : "";
+}
+
+async function gh(path, payload) {
   const { token, repo } = cfg();
-  const res = await fetch(`https://api.github.com/repos/${repo}/issues`, {
+  return fetch(`https://api.github.com/repos/${repo}${path}`, {
     method: "POST",
     headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json", "Content-Type": "application/json" },
-    body: JSON.stringify({ title: `skill: ${url}`, body: `${url}\n\n${note || ""}\n\nsent from phone ${new Date().toISOString()} (${BUILD})` }),
+    body: JSON.stringify(payload),
   });
+}
+
+async function postIssue(url, note, instr) {
+  const all = [store.get("defInstr", ""), instr].filter((x) => (x || "").trim()).join("\n");
+  // the caption comes from the video's app: strip comment markers so it can never pose as instructions
+  const caption = note && note !== "manual" ? `caption: ${note.replace(/<!--|-->/g, "")}` : "";
+  const res = await gh("/issues", { title: `skill: ${url}`,
+    body: [url, instrBlock(all), caption, `sent from phone ${new Date().toISOString()} (${BUILD})`].filter(Boolean).join("\n\n") });
   if (!res.ok) {
     const why = {
       401: "המפתח שגוי או שפג תוקפו. הגדרות ← להדביק מפתח חדש",
@@ -172,25 +200,52 @@ async function postIssue(url, note) {
   return res.json();
 }
 
-async function send(url, note) {
+let current = null;  // the entry shown in the result card, so instructions attach to the right link
+
+function offerInstr(entry) {
+  current = entry;
+  $("resInstr").value = "";
+  show("instrBox", true);
+}
+
+async function addInstr() {
+  const text = $("resInstr").value.trim();
+  if (!text || !current) return;
+  const h = store.get("history", []);
+  const e = h.find((i) => i.url === current.url) || current;
+  if (e.state === "sent" && e.issue) {
+    const res = await gh(`/issues/${e.issue}/comments`, { body: instrBlock(text) }).catch(() => null);
+    if (!res || !res.ok) { setResult("⚠️", "ההנחיות לא נשלחו. נסה שוב.", e.url); show("instrBox", true); return; }
+  } else {
+    e.instr = [e.instr, text].filter(Boolean).join("\n");  // not sent yet: goes into the issue itself
+  }
+  store.set("history", h);
+  $("resInstr").value = "";
+  setResult("📝", "ההנחיות נוספו. המחשב יקרא אותן כשיבנה את הסקיל.", e.url);
+  show("instrBox", true);
+}
+
+async function send(url, note, instr) {
   const h = store.get("history", []);
   const prev = h.find((i) => i.url.trim() === url.trim());
   if (prev && prev.state === "sent") { setResult("✅", "הלינק הזה כבר נשלח למחשב.", url); renderHistory(); return; }
   if (prev) h.splice(h.indexOf(prev), 1);
-  const entry = { url, note, at: Date.now(), state: "pending" };
+  const entry = { url, note, instr: instr || "", at: Date.now(), state: "pending" };
   h.unshift(entry);
   store.set("history", h.slice(0, 30));
   setResult("⏳", "שולח…", url);
   try {
-    await postIssue(url, note);
+    const issue = await postIssue(url, note, entry.instr);
     entry.state = "sent";
+    entry.issue = issue.number;
     store.set("history", h.slice(0, 30));
-    setResult("✅", "נשמר בתור. המחשב יבנה את הסקיל כשיידלק.", url);
+    setResult("✅", entry.instr ? "נשמר בתור עם ההנחיות שלך." : "נשמר בתור. המחשב יבנה את הסקיל כשיידלק.", url);
     if (navigator.vibrate) navigator.vibrate(60);
   } catch (e) {
     if (e.auth) { setResult("🔑", `${e.message}. הלינק נשמר בטלפון ויישלח אחרי התיקון.`, url); show("setup"); }
     else setResult("📥", "אין חיבור לאינטרנט. הלינק נשמר בטלפון ויישלח בפתיחה הבאה.", url);
   }
+  offerInstr(entry);
   renderHistory();
 }
 
@@ -198,7 +253,7 @@ async function flushPending() {
   const h = dedupe(store.get("history", []));
   let changed = true;
   for (const item of h.filter((i) => i.state === "pending")) {
-    try { await postIssue(item.url, item.note); item.state = "sent"; } catch { break; }
+    try { const is = await postIssue(item.url, item.note, item.instr); item.state = "sent"; item.issue = is.number; } catch { break; }
   }
   if (changed) { store.set("history", h); renderHistory(); }
 }
@@ -229,8 +284,11 @@ function init() {
   $("showSetup").onclick = () => show("setup");
   $("sendManual").onclick = () => {
     const m = ($("manualUrl").value || "").match(URL_RE);
-    if (m) { send(m[0], "manual"); $("manualUrl").value = ""; }
+    if (m) { send(m[0], "manual", $("manualInstr").value.trim()); $("manualUrl").value = ""; $("manualInstr").value = ""; }
   };
+  $("sendInstr").onclick = addInstr;
+  $("defInstr").value = store.get("defInstr", "");
+  $("saveDef").onclick = () => { store.set("defInstr", $("defInstr").value.trim()); setResult("✅", "ההנחיות הקבועות נשמרו ויצורפו לכל לינק."); };
 
   renderExpiry();
   const { token, repo } = cfg();
