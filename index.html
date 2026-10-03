@@ -86,8 +86,8 @@
   <div class="stamp">Build <span id="build"></span></div>
 </main>
 <script>
-const BUILD = "2026-09-27 21:35 v4 my-instructions";
-const TOKEN_DAYS = 366;          // GitHub's maximum for a fine-grained token; the create link asks for exactly this
+const BUILD = "2026-10-04 00:42 v5 token-365-dedupe";
+const TOKEN_DAYS = 365;          // GitHub's cap for a personal account is 365 (366 is rejected: "exceeds the allowed limit")
 const WARN_DAYS = 14;
 document.getElementById("build").textContent = BUILD;
 const $ = (id) => document.getElementById(id);
@@ -112,7 +112,7 @@ function tokenLink() {
   const repo = cfg().repo || "idoyan-spec/video-skill-inbox";
   const p = new URLSearchParams({
     name: `skill-share-phone ${new Date().toISOString().slice(0, 10)}`,
-    description: "סקיל מסרטון: פותח issue בריפו התור",
+    description: "skill-share phone: opens issues in the inbox repo",
     target_name: repo.split("/")[0],
     expires_in: String(TOKEN_DAYS),
     issues: "write",
@@ -149,9 +149,23 @@ async function checkToken(token, repo) {
 }
 
 // The share sheet sometimes fires twice for one tap; one link must become one issue.
+// One video, many URL spellings (youtu.be vs watch?v=, &t=, ?si=, ?stkn=): compare by video, not by string.
+function videoKey(u) {
+  try {
+    const x = new URL(u.trim());
+    const h = x.hostname.replace(/^(www|m|music)\./, "");
+    let id = null;
+    if (h === "youtu.be") id = x.pathname.slice(1).split("/")[0];
+    else if (h.endsWith("youtube.com")) id = x.searchParams.get("v") || (x.pathname.match(/^\/(?:shorts|live|embed)\/([\w-]{6,})/) || [])[1];
+    if (id) return "yt:" + id;
+    const v = x.searchParams.get("v");  // facebook watch?v=
+    return h + x.pathname.replace(/\/$/, "") + (v ? "?v=" + v : "");
+  } catch { return u.trim(); }
+}
+
 function dedupe(h) {
   const seen = new Set();
-  return h.filter((i) => { const k = i.url.trim(); if (seen.has(k)) return false; seen.add(k); return true; });
+  return h.filter((i) => { const k = videoKey(i.url); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 
 function renderHistory() {
@@ -227,7 +241,7 @@ async function addInstr() {
 
 async function send(url, note, instr) {
   const h = store.get("history", []);
-  const prev = h.find((i) => i.url.trim() === url.trim());
+  const prev = h.find((i) => videoKey(i.url) === videoKey(url));
   if (prev && prev.state === "sent") { setResult("✅", "הלינק הזה כבר נשלח למחשב.", url); renderHistory(); return; }
   if (prev) h.splice(h.indexOf(prev), 1);
   const entry = { url, note, instr: instr || "", at: Date.now(), state: "pending" };
