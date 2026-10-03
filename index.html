@@ -33,6 +33,17 @@
   a { color:var(--warn); }
   a.btnlink { display:block; text-align:center; padding:13px; border-radius:12px; border:1px solid var(--warn); margin-top:12px; text-decoration:none; font-weight:600; }
   .warnbar { background:#3b3217; border:1px solid var(--warn); }
+  .draft { border-top:1px solid #2f3350; padding-top:12px; margin-top:12px; }
+  .draft:first-of-type { border-top:0; margin-top:6px; padding-top:0; }
+  .draft h3 { margin:0 0 6px; font-size:18px; direction:ltr; text-align:right; }
+  .draft .sum { font-size:14px; white-space:pre-wrap; color:var(--fg); }
+  .draft details { margin-top:8px; font-size:13px; color:var(--muted); }
+  .draft details div { white-space:pre-wrap; margin-top:6px; max-height:60vh; overflow:auto; }
+  .row { display:flex; gap:8px; }
+  .row button { flex:1; font-size:15px; padding:12px 6px; }
+  button.ok { background:#2c8f5a; }
+  button.del { background:transparent; border:1px solid var(--err); color:var(--err); }
+  .msg { font-size:14px; margin-top:10px; color:var(--warn); white-space:pre-wrap; }
 </style>
 </head>
 <body>
@@ -49,7 +60,7 @@
       <label for="resInstr">הנחיות משלך לסקיל הזה (לא חובה)</label>
       <textarea id="resInstr" placeholder="למשל: תתמקד רק בחלק על X · תקרא לו Y · תתאים ל-Windows · בלי סקריפטים"></textarea>
       <button id="sendInstr">הוסף הנחיות</button>
-      <p class="hint">אפשר להוסיף הנחיות גם אחרי השליחה, כל עוד המחשב עוד לא התחיל לבנות (הוא בודק פעם בשעה).</p>
+      <p class="hint">אפשר להוסיף הנחיות גם אחרי השליחה, כל עוד המחשב עוד לא התחיל לבנות (הוא בודק כל 5 דקות).</p>
     </div>
   </section>
 
@@ -77,6 +88,12 @@
     <button id="sendManual">שלח למחשב</button>
   </section>
 
+  <section id="drafts" class="card hidden">
+    <b>ממתינים לאישור</b>
+    <div id="draftList"></div>
+    <button class="ghost" id="refreshDrafts">רענן</button>
+  </section>
+
   <section id="history" class="card hidden">
     <b>נשלחו לאחרונה</b>
     <ul id="histList"></ul>
@@ -86,7 +103,7 @@
   <div class="stamp">Build <span id="build"></span></div>
 </main>
 <script>
-const BUILD = "2026-10-04 00:42 v5 token-365-dedupe";
+const BUILD = "2026-10-04 01:05 v6 approve-from-phone";
 const TOKEN_DAYS = 365;          // GitHub's cap for a personal account is 365 (366 is rejected: "exceeds the allowed limit")
 const WARN_DAYS = 14;
 document.getElementById("build").textContent = BUILD;
@@ -272,6 +289,95 @@ async function flushPending() {
   if (changed) { store.set("history", h); renderHistory(); }
 }
 
+// ---- drafts waiting for a decision: the PC posts a card on the issue (label `ready`); a decision goes back as an
+// owner comment with a command marker + the `command` label, and the PC runs it on its next poll (every 5 minutes).
+async function ghGet(path) {
+  const { token, repo } = cfg();
+  const res = await fetch(`https://api.github.com/repos/${repo}${path}`, {
+    headers: { "Authorization": `Bearer ${token}`, "Accept": "application/vnd.github+json" }, cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`GitHub ${res.status}`);
+  return res.json();
+}
+
+function plain(md) {
+  return md.replace(/\*\*/g, "").replace(/`/g, "").replace(/<[^>]+>/g, "").trim();
+}
+
+const CMDS = {
+  "fix-install": ["🛠 תקן והתקן", "ok", "יתקן לפי הביקורת, יבדוק שוב, ויתקין אם הבדיקות נקיות."],
+  "install": ["✅ התקן כמו שהוא", "", "יתקין עכשיו בלי שינויים."],
+  "reject": ["🗑 דחה", "del", "הטיוטה תימחק."],
+};
+
+async function sendCommand(issue, cmd, text, box) {
+  const body = [`<!-- command: ${cmd} -->`, instrBlock(text), `from phone ${new Date().toISOString()} (${BUILD})`]
+    .filter(Boolean).join("\n\n");
+  const msg = box.querySelector(".msg");
+  msg.textContent = "שולח…";
+  const r1 = await gh(`/issues/${issue}/comments`, { body }).catch(() => null);
+  const r2 = r1 && r1.ok ? await gh(`/issues/${issue}/labels`, { labels: ["command"] }).catch(() => null) : null;
+  if (!r2 || !r2.ok) { msg.textContent = "⚠️ לא נשלח. בדוק חיבור ונסה שוב."; return; }
+  box.querySelectorAll("button, textarea").forEach((b) => (b.disabled = true));
+  msg.textContent = "📨 נשלח. המחשב יבצע תוך כמה דקות (כשהוא דולק), והתשובה תגיע בטלגרם.";
+}
+
+function draftCard(issue, card) {
+  const box = document.createElement("div");
+  box.className = "draft";
+  const name = (card.body.match(/<!-- draft: ([\w.-]+) -->/) || [])[1] || issue.title;
+  const [head] = card.body.split("<!-- draft:");
+  const full = (card.body.match(/<details><summary>[^<]*<\/summary>([\s\S]*)<\/details>/) || [])[1] || "";
+  const pending = issue.labels.some((l) => l.name === "command");
+  box.innerHTML = `<h3></h3><div class="sum"></div><details><summary>הביקורת המלאה</summary><div></div></details>
+    <label>שינוי משלך (לא חובה): מה לתקן, להוסיף או להוריד</label>
+    <textarea placeholder="למשל: תוריד את החלק על Vercel · תוסיף דוגמה בעברית · תשנה את השם ל-…"></textarea>
+    <button class="ghost" data-cmd="edit">✏️ שלח שינוי (בלי להתקין)</button>
+    <div class="row"></div><div class="msg"></div>`;
+  box.querySelector("h3").textContent = name;
+  box.querySelector(".sum").textContent = plain(head);
+  box.querySelector("details div").textContent = plain(full);
+  const row = box.querySelector(".row");
+  for (const [cmd, [label, cls, hint]] of Object.entries(CMDS)) {
+    const b = document.createElement("button");
+    b.textContent = label; b.className = cls; b.title = hint;
+    let armed = false;  // destructive/final actions need a second tap, no browser dialogs
+    b.onclick = () => {
+      if (!armed) { armed = true; b.textContent = "לחץ שוב לאישור"; box.querySelector(".msg").textContent = hint; return; }
+      sendCommand(issue.number, cmd, box.querySelector("textarea").value.trim(), box);
+    };
+    row.appendChild(b);
+  }
+  box.querySelector('[data-cmd="edit"]').onclick = () => {
+    const t = box.querySelector("textarea").value.trim();
+    if (!t) { box.querySelector(".msg").textContent = "כתוב קודם מה לשנות."; return; }
+    sendCommand(issue.number, "edit", t, box);
+  };
+  if (pending) {
+    box.querySelectorAll("button, textarea").forEach((b) => (b.disabled = true));
+    box.querySelector(".msg").textContent = "⏳ כבר נשלחה פקודה. המחשב יבצע אותה בבדיקה הבאה.";
+  }
+  return box;
+}
+
+async function loadDrafts() {
+  const list = $("draftList");
+  try {
+    const issues = await ghGet("/issues?state=all&labels=ready&per_page=20");
+    list.innerHTML = "";
+    for (const issue of issues) {
+      const comments = await ghGet(`/issues/${issue.number}/comments?per_page=100`);
+      const card = comments.filter((c) => (c.body || "").includes("<!-- draft:")).pop();
+      if (card) list.appendChild(draftCard(issue, card));
+    }
+    if (!list.children.length) list.innerHTML = '<p class="hint">אין כרגע טיוטות שמחכות לך.</p>';
+    show("drafts");
+  } catch (e) {
+    list.innerHTML = `<p class="hint">לא הצלחתי לטעון (${e.message}).</p>`;
+    show("drafts");
+  }
+}
+
 function init() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("repo")) store.set("repo", hash.get("repo"));
@@ -296,6 +402,7 @@ function init() {
     renderHistory();
   };
   $("showSetup").onclick = () => show("setup");
+  $("refreshDrafts").onclick = loadDrafts;
   $("sendManual").onclick = () => {
     const m = ($("manualUrl").value || "").match(URL_RE);
     if (m) { send(m[0], "manual", $("manualInstr").value.trim()); $("manualUrl").value = ""; $("manualInstr").value = ""; }
@@ -321,6 +428,7 @@ function init() {
     setResult("⚠️", "לא נמצא לינק בתוכן ששותף.", shared.slice(0, 120));
   }
   flushPending();
+  loadDrafts();
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
